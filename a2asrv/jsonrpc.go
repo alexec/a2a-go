@@ -158,6 +158,19 @@ func (h *jsonrpcHandler) handleStreamingRequest(ctx context.Context, rw http.Res
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error(requestCtx, "panic in streaming request handler", fmt.Errorf("panic: %v", r))
+				// Send error response on panic and close the channel
+				jsonrpcErr := jsonrpc.ToJSONRPCError(a2a.ErrInternalError)
+				resp := jsonrpcResponse{JSONRPC: jsonrpc.Version, ID: req.ID, Error: jsonrpcErr}
+				bytes, err := json.Marshal(resp)
+				if err != nil {
+					log.Error(requestCtx, "failed to marshal panic error response", err)
+				} else {
+					select {
+					case <-requestCtx.Done():
+					case sseChan <- bytes:
+					}
+				}
+				close(sseChan)
 			}
 		}()
 		var events iter.Seq2[a2a.Event, error]

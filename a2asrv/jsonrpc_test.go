@@ -358,7 +358,10 @@ func TestJSONRPC_PanicRecovery(t *testing.T) {
 			// Read the SSE response
 			var responseData []byte
 			buf := make([]byte, 4096)
-			n, _ := resp.Body.Read(buf)
+			n, err := resp.Body.Read(buf)
+			if err != nil && err.Error() != "EOF" {
+				t.Fatalf("resp.Body.Read() error = %v", err)
+			}
 			responseData = buf[:n]
 
 			// The response should contain a JSON-RPC error response
