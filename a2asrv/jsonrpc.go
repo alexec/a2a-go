@@ -21,11 +21,18 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/internal/jsonrpc"
 	"github.com/a2aproject/a2a-go/internal/sse"
 	"github.com/a2aproject/a2a-go/log"
+)
+
+const (
+	// defaultKeepAliveInterval is the default interval for sending SSE keep-alive messages.
+	// This can be overridden by setting jsonrpcHandler.keepAliveInterval.
+	defaultKeepAliveInterval = 15 * time.Second
 )
 
 // jsonrpcRequest represents a JSON-RPC 2.0 request.
@@ -46,12 +53,16 @@ type jsonrpcResponse struct {
 }
 
 type jsonrpcHandler struct {
-	handler RequestHandler
+	handler           RequestHandler
+	keepAliveInterval time.Duration
 }
 
 // NewJSONRPCHandler creates an [http.Handler] implementation for serving A2A-protocol over JSONRPC.
 func NewJSONRPCHandler(handler RequestHandler) http.Handler {
-	return &jsonrpcHandler{handler: handler}
+	return &jsonrpcHandler{
+		handler:           handler,
+		keepAliveInterval: defaultKeepAliveInterval,
+	}
 }
 
 func (h *jsonrpcHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -167,11 +178,18 @@ func (h *jsonrpcHandler) handleStreamingRequest(ctx context.Context, rw http.Res
 		eventSeqToSSEDataStream(requestCtx, req, sseChan, events)
 	}()
 
+	keepAliveTicker := time.NewTicker(h.keepAliveInterval)
+	defer keepAliveTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		// TODO: start sending keep-alive when other SDK-s support it: https://github.com/a2aproject/a2a-python/issues/540
+		case <-keepAliveTicker.C:
+			if err := sseWriter.WriteKeepAlive(ctx); err != nil {
+				log.Error(ctx, "failed to write keep-alive", err)
+				return
+			}
 		case data, ok := <-sseChan:
 			if !ok {
 				return

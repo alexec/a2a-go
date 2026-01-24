@@ -15,6 +15,7 @@
 package a2asrv
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,11 +23,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
+	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/a2aproject/a2a-go/internal/jsonrpc"
+	"github.com/a2aproject/a2a-go/internal/sse"
 	"github.com/a2aproject/a2a-go/internal/testutil"
 	"github.com/google/go-cmp/cmp"
 )
@@ -276,4 +281,124 @@ func mustUnmarshal(t *testing.T, data []byte) map[string]any {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	return result
+}
+
+func TestJSONRPC_KeepAlive(t *testing.T) {
+	t.Parallel()
+
+	// Channel to coordinate test flow
+	keepAliveReceived := make(chan struct{})
+	shouldSendEvent := make(chan struct{})
+
+	// Create a task for the test
+	taskID := a2a.NewTaskID()
+	contextID := a2a.NewContextID()
+	task := &a2a.Task{ID: taskID, ContextID: contextID}
+
+	// Create a mock agent executor that waits for the test to signal
+	executor := &mockAgentExecutor{
+		ExecuteFunc: func(ctx context.Context, reqCtx *RequestContext, q eventqueue.Queue) error {
+			// Wait until the test has detected keep-alive
+			select {
+			case <-shouldSendEvent:
+				// Send a terminal event
+				event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil)
+				if err := q.Write(ctx, event); err != nil {
+					return err
+				}
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+
+	store := testutil.NewTestTaskStore().WithTasks(t, task)
+	reqHandler := NewHandler(executor, WithTaskStore(store))
+	jsonrpcHandler := &jsonrpcHandler{
+		handler:           reqHandler,
+		keepAliveInterval: 50 * time.Millisecond, // Small interval for testing
+	}
+	server := httptest.NewServer(jsonrpcHandler)
+	defer server.Close()
+
+	// Create a message
+	message := &a2a.Message{
+		ID:     "message-id",
+		Parts:  []a2a.Part{a2a.TextPart{Text: "test"}},
+		Role:   a2a.MessageRoleUser,
+		TaskID: taskID,
+	}
+
+	// Prepare the request
+	req := jsonrpcRequest{
+		JSONRPC: jsonrpc.Version,
+		Method:  jsonrpc.MethodMessageStream,
+		Params:  mustMarshal(t, a2a.MessageSendParams{Message: message}),
+		ID:      "test-1",
+	}
+
+	ctx := t.Context()
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewBuffer(mustMarshal(t, req)))
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext() error = %v", err)
+	}
+	httpReq.Header.Set("Accept", sse.ContentEventStream)
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		t.Fatalf("client.Do() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Read the response body line by line to detect keep-alive
+	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 0, bufio.MaxScanTokenSize)
+	scanner.Buffer(buf, sse.MaxSSETokenSize)
+
+	keepAliveDetected := false
+	terminalEventReceived := false
+
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// Detect keep-alive comment
+			if line == ": keep-alive" {
+				if !keepAliveDetected {
+					keepAliveDetected = true
+					// Signal that we detected keep-alive
+					close(keepAliveReceived)
+				}
+			}
+
+			// Detect data events
+			if strings.HasPrefix(line, "data: ") {
+				terminalEventReceived = true
+			}
+		}
+	}()
+
+	// Wait for keep-alive to be received
+	select {
+	case <-keepAliveReceived:
+		// Good, keep-alive was detected
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for keep-alive")
+	}
+
+	// Now signal the mock executor to send the terminal event
+	close(shouldSendEvent)
+
+	// Wait for the terminal event to be received
+	time.Sleep(100 * time.Millisecond) // Give some time for the event to be processed
+
+	if !keepAliveDetected {
+		t.Error("keep-alive was not detected")
+	}
+
+	if !terminalEventReceived {
+		t.Error("terminal event was not received after keep-alive")
+	}
 }
