@@ -155,6 +155,11 @@ func (h *jsonrpcHandler) handleStreamingRequest(ctx context.Context, rw http.Res
 	requestCtx, cancelReqCtx := context.WithCancel(ctx)
 	defer cancelReqCtx()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error(requestCtx, "panic in streaming request handler", fmt.Errorf("panic: %v", r))
+			}
+		}()
 		var events iter.Seq2[a2a.Event, error]
 		switch req.Method {
 		case jsonrpc.MethodTasksResubscribe:
@@ -202,6 +207,14 @@ func eventSeqToSSEDataStream(ctx context.Context, req *jsonrpcRequest, sseChan c
 		case sseChan <- bytes:
 		}
 	}
+
+	// Recover from panics during event iteration
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error(ctx, "panic during event iteration", fmt.Errorf("panic: %v", r))
+			handleError(a2a.ErrInternalError)
+		}
+	}()
 
 	for event, err := range events {
 		if err != nil {

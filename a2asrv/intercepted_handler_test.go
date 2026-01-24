@@ -30,6 +30,7 @@ type mockHandler struct {
 	resultErr             error
 	OnSendMessageFn       func(ctx context.Context, params *a2a.MessageSendParams) (a2a.SendMessageResult, error)
 	OnSendMessageStreamFn func(ctx context.Context, params *a2a.MessageSendParams) iter.Seq2[a2a.Event, error]
+	OnResubscribeToTaskFn func(ctx context.Context, params *a2a.TaskIDParams) iter.Seq2[a2a.Event, error]
 }
 
 var _ RequestHandler = (*mockHandler)(nil)
@@ -76,6 +77,9 @@ func (h *mockHandler) OnSendMessageStream(ctx context.Context, params *a2a.Messa
 }
 
 func (h *mockHandler) OnResubscribeToTask(ctx context.Context, params *a2a.TaskIDParams) iter.Seq2[a2a.Event, error] {
+	if h.OnResubscribeToTaskFn != nil {
+		return h.OnResubscribeToTaskFn(ctx, params)
+	}
 	return func(yield func(a2a.Event, error) bool) {
 		h.lastCallContext, _ = CallContextFrom(ctx)
 		if h.resultErr != nil {

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -276,4 +277,100 @@ func mustUnmarshal(t *testing.T, data []byte) map[string]any {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	return result
+}
+
+func TestJSONRPC_PanicRecovery(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		method       string
+		setupHandler func() RequestHandler
+	}{
+		{
+			name:   "panic in OnSendMessageStream",
+			method: jsonrpc.MethodMessageStream,
+			setupHandler: func() RequestHandler {
+				return &mockHandler{
+					OnSendMessageStreamFn: func(ctx context.Context, params *a2a.MessageSendParams) iter.Seq2[a2a.Event, error] {
+						return func(yield func(a2a.Event, error) bool) {
+							panic("test panic in OnSendMessageStream")
+						}
+					},
+				}
+			},
+		},
+		{
+			name:   "panic in OnResubscribeToTask",
+			method: jsonrpc.MethodTasksResubscribe,
+			setupHandler: func() RequestHandler {
+				return &mockHandler{
+					OnResubscribeToTaskFn: func(ctx context.Context, params *a2a.TaskIDParams) iter.Seq2[a2a.Event, error] {
+						return func(yield func(a2a.Event, error) bool) {
+							panic("test panic in OnResubscribeToTask")
+						}
+					},
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			reqHandler := tc.setupHandler()
+			server := httptest.NewServer(NewJSONRPCHandler(reqHandler))
+			defer server.Close()
+
+			reqBody := jsonrpcRequest{
+				JSONRPC: jsonrpc.Version,
+				Method:  tc.method,
+				Params:  json.RawMessage(`{}`),
+				ID:      "test-panic",
+			}
+			body, err := json.Marshal(reqBody)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+
+			req, err := http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatalf("http.NewRequestWithContext() error = %v", err)
+			}
+
+			client := &http.Client{}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("client.Do() error = %v", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("resp.Body.Close() error = %v", err)
+				}
+			}()
+
+			if resp.StatusCode != 200 {
+				t.Errorf("resp.StatusCode = %d, want 200", resp.StatusCode)
+			}
+
+			// Read the SSE response
+			var responseData []byte
+			buf := make([]byte, 4096)
+			n, _ := resp.Body.Read(buf)
+			responseData = buf[:n]
+
+			// The response should contain a JSON-RPC error response
+			responseStr := string(responseData)
+			if !bytes.Contains(responseData, []byte("error")) {
+				t.Errorf("expected error in response, got: %s", responseStr)
+			}
+
+			// Verify that the error is an internal error
+			if !bytes.Contains(responseData, []byte("-32603")) {
+				t.Errorf("expected internal error code -32603 in response, got: %s", responseStr)
+			}
+		})
+	}
 }
