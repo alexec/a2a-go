@@ -289,6 +289,7 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	// Channel to coordinate test flow
 	keepAliveReceived := make(chan struct{})
 	shouldSendEvent := make(chan struct{})
+	scanComplete := make(chan error, 1)
 
 	// Create a task for the test
 	taskID := a2a.NewTaskID()
@@ -361,6 +362,11 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	terminalEventReceived := false
 
 	go func() {
+		defer func() {
+			// Signal scan completion with any error
+			scanComplete <- scanner.Err()
+		}()
+
 		for scanner.Scan() {
 			line := scanner.Text()
 
@@ -376,6 +382,8 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 			// Detect data events
 			if strings.HasPrefix(line, "data: ") {
 				terminalEventReceived = true
+				// Exit after receiving terminal event
+				return
 			}
 		}
 	}()
@@ -391,8 +399,15 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	// Now signal the mock executor to send the terminal event
 	close(shouldSendEvent)
 
-	// Wait for the terminal event to be received
-	time.Sleep(100 * time.Millisecond) // Give some time for the event to be processed
+	// Wait for the terminal event to be received or scan to complete
+	select {
+	case err := <-scanComplete:
+		if err != nil {
+			t.Fatalf("scanner error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for terminal event")
+	}
 
 	if !keepAliveDetected {
 		t.Error("keep-alive was not detected")
