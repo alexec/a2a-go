@@ -283,17 +283,19 @@ func mustUnmarshal(t *testing.T, data []byte) map[string]any {
 	return result
 }
 
+type scanResult struct {
+	keepAliveDetected     bool
+	terminalEventReceived bool
+	err                   error
+}
+
 func TestJSONRPC_KeepAlive(t *testing.T) {
 	t.Parallel()
 
 	// Channel to coordinate test flow
 	keepAliveReceived := make(chan struct{})
 	shouldSendEvent := make(chan struct{})
-	scanComplete := make(chan struct {
-		keepAliveDetected     bool
-		terminalEventReceived bool
-		err                   error
-	}, 1)
+	scanComplete := make(chan scanResult, 1)
 
 	// Create a task for the test
 	taskID := a2a.NewTaskID()
@@ -368,11 +370,11 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 
 		defer func() {
 			// Signal scan completion with results
-			scanComplete <- struct {
-				keepAliveDetected     bool
-				terminalEventReceived bool
-				err                   error
-			}{keepAliveDetected, terminalEventReceived, scanner.Err()}
+			scanComplete <- scanResult{
+				keepAliveDetected:     keepAliveDetected,
+				terminalEventReceived: terminalEventReceived,
+				err:                   scanner.Err(),
+			}
 		}()
 
 		for scanner.Scan() {
@@ -408,11 +410,7 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	close(shouldSendEvent)
 
 	// Wait for the terminal event to be received or scan to complete
-	var result struct {
-		keepAliveDetected     bool
-		terminalEventReceived bool
-		err                   error
-	}
+	var result scanResult
 	select {
 	case result = <-scanComplete:
 		if result.err != nil {
