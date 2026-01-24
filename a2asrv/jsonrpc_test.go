@@ -289,7 +289,11 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	// Channel to coordinate test flow
 	keepAliveReceived := make(chan struct{})
 	shouldSendEvent := make(chan struct{})
-	scanComplete := make(chan error, 1)
+	scanComplete := make(chan struct {
+		keepAliveDetected     bool
+		terminalEventReceived bool
+		err                   error
+	}, 1)
 
 	// Create a task for the test
 	taskID := a2a.NewTaskID()
@@ -358,13 +362,17 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	buf := make([]byte, 0, bufio.MaxScanTokenSize)
 	scanner.Buffer(buf, sse.MaxSSETokenSize)
 
-	keepAliveDetected := false
-	terminalEventReceived := false
-
 	go func() {
+		keepAliveDetected := false
+		terminalEventReceived := false
+
 		defer func() {
-			// Signal scan completion with any error
-			scanComplete <- scanner.Err()
+			// Signal scan completion with results
+			scanComplete <- struct {
+				keepAliveDetected     bool
+				terminalEventReceived bool
+				err                   error
+			}{keepAliveDetected, terminalEventReceived, scanner.Err()}
 		}()
 
 		for scanner.Scan() {
@@ -400,20 +408,25 @@ func TestJSONRPC_KeepAlive(t *testing.T) {
 	close(shouldSendEvent)
 
 	// Wait for the terminal event to be received or scan to complete
+	var result struct {
+		keepAliveDetected     bool
+		terminalEventReceived bool
+		err                   error
+	}
 	select {
-	case err := <-scanComplete:
-		if err != nil {
-			t.Fatalf("scanner error: %v", err)
+	case result = <-scanComplete:
+		if result.err != nil {
+			t.Fatalf("scanner error: %v", result.err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for terminal event")
 	}
 
-	if !keepAliveDetected {
+	if !result.keepAliveDetected {
 		t.Error("keep-alive was not detected")
 	}
 
-	if !terminalEventReceived {
+	if !result.terminalEventReceived {
 		t.Error("terminal event was not received after keep-alive")
 	}
 }
